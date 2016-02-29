@@ -1,0 +1,177 @@
+---
+layout: post
+title: "用最精简的实现iOS9 任务卡动画的竖屏版"
+date: 2016-02-25 20:03:02
+comments: true
+categories: animation
+description: "用UICollectionView最大程度优化实现iOS9的任务卡动画" 
+keywords: uicollectionview,ios9,task,任务卡,任务
+---
+
+## 一. 前言
+想去年为了这个效果研究了整整一周，起始对`UICollectionView`并不熟悉，慢慢琢磨，遇到了各种困难，比如边界回弹，点击事件等，最后顺利完成，再此分享一下做这个动画的完整思路。  
+
+!["UICollectionView原理"](/images/animations/11.jpg)
+
+
+## 二. 组件的选择
+1.要实现一个类似iOS9的任务卡的卡牌的竖排版，你会如何选择组件？  
+  
+| 名称 | 优点 | 缺点 |
+| --- | --- | --- |
+| UIScrollView | 可以自由控制动画，以及滚动速率等 | 1.要自己实现View的复用，否则会占用内存 2.代码量太大，占安装包大小，后人很难维护 |
+| UICollectionView | 对UIScrollview的封装，无法像UIScrollView那样自由控制底层参数 | 便于维护，不用自己写复用View，代码量小 |
+
+## 三. 思路
+
+### 1. 布局
+首先我们需要一个UICollectionView,collectionView里每一页都是一张card，一屏5张card.  
+因为UICollectionView是和UITableView类似，这时候如何让其有不同间距的排下来呢？这里我用了一个取巧的办法。  
+如何所示:  
+!["UICollectionView原理"](/images/animations/12.png)  
+  
+### 2. 原理  
+其次，我们需要在UICollectionViewFlowLayout中每次滚动的时候判断每张card距离中心的距离，根据这个值来调整它的alpha，scale以及x轴的translation。  
+
+alpha：右边的card alpha都是1，左边的越靠左alpha越小 
+scale： 从左往右依次变大 
+translation：除了中间的card，所有的card都会右偏，而为了让中间card大部分都露出来，右边的card偏移需要比左边大
+
+### 3. 滚动的时候3D变换
+
+```objc
+-(NSArray*)layoutAttributesForElementsInRect:(CGRect)rect
+{
+    [self.arrayVisibleAttributes removeAllObjects];
+
+    NSMutableArray* attributes = [NSMutableArray array];
+    for (NSInteger i = 0 ; i < self.cellCount; i++) {
+        NSIndexPath* indexPath = [NSIndexPath indexPathForItem:i inSection:0];
+        [attributes addObject:[self layoutAttributesForItemAtIndexPath:indexPath]];
+    }
+    return attributes;
+}
+
+-(UICollectionViewLayoutAttributes *)layoutAttributesForItemAtIndexPath:(NSIndexPath *)path
+{
+    CGRect visibleRect;
+    visibleRect.origin = self.collectionView.contentOffset;
+    visibleRect.size = self.collectionView.bounds.size;
+    
+    UICollectionViewLayoutAttributes* attributes = [[super layoutAttributesForItemAtIndexPath:path] copy];
+    
+    //可视区域上面一个也需要，防止突然出现的效果，因为CATransform3DMakeTranslation会产生3d效果，故而应用CGRectIntersectsRect
+    CGRect visibleRectAddLast = CGRectMake(0, visibleRect.origin.y - ITEM_SIZE_HEIGHT, self.collectionView.frame.size.width, visibleRect.size.height + ITEM_SIZE_HEIGHT);
+    
+    if(CGRectIntersectsRect(visibleRectAddLast,attributes.frame)){
+        attributes.alpha = 1.f;
+        
+        // scale
+        CGFloat progress = [self getYCoordinate:attributes];
+        CGFloat scaleWidth = 1 + (progress) * 0.06;
+        CGFloat scaleHeight = 1 + (progress) * 0.06;
+        
+        // translation
+        CGFloat translation = 0;
+        if (progress > 0) {
+            translation = fabs(progress) * (self.collectionView.frame.size.height * 0.12);//SCREEN_HEIGHT/ 8.f;
+        } else {
+            translation = fabs(progress) * fabs(progress) * (self.collectionView.frame.size.height * 0.04803);//SCREEN_HEIGHT/ 22.5f;
+        }
+        
+        CATransform3D tranScale = CATransform3DMakeScale(scaleWidth, scaleHeight, 0.0);
+        CATransform3D tranTrans = CATransform3DMakeTranslation(0, translation-ITEM_SIZE_HEIGHT/5.8, 0.0);//向上平移
+        CATransform3D transResult = CATransform3DConcat(tranScale, tranTrans);
+        
+        attributes.zIndex = path.row;
+        attributes.transform3D = transResult;
+        
+        if(path.row == 0 || path.row == 1)
+        {
+            attributes.alpha = 0.f;
+        }
+        
+        [self.arrayVisibleAttributes addObject:attributes];
+    }else{
+        attributes.alpha = 0.f;
+    }
+//    [self setBounce:attributes];
+    
+    return attributes;
+
+}
+```
+
+### 4. 滚动完成自动对其到某个位置
+
+```objc
+- (CGPoint)targetContentOffsetForProposedContentOffset:(CGPoint)proposedContentOffset withScrollingVelocity:(CGPoint)velocity
+{
+    //  proposedContentOffset是没有对齐到网格时停下来的位置
+    CGFloat offsetAdjustment = MAXFLOAT;
+    CGFloat verticalCenter = proposedContentOffset.y + (ITEM_SIZE_HEIGHT / 2.0);
+    
+    //  当前显示的区域
+    CGRect targetRect = CGRectMake(0.0, proposedContentOffset.y, self.collectionView.bounds.size.width, self.collectionView.bounds.size.height);
+    
+    //取当前显示的item
+    NSArray* array = [super layoutAttributesForElementsInRect:targetRect];
+    
+    //对当前屏幕中的UICollectionViewLayoutAttributes逐个与屏幕中心进行比较，找出最接近中心的一个
+    for (UICollectionViewLayoutAttributes* layoutAttributes in array) {
+        CGFloat itemVerticalCenter = layoutAttributes.center.y;
+        
+        if (ABS(itemVerticalCenter - verticalCenter) < ABS(offsetAdjustment)) {
+            offsetAdjustment = itemVerticalCenter - verticalCenter;
+        }
+        
+        NSInteger currentIndex = (NSInteger)(labs((NSInteger)layoutAttributes.indexPath.row - (NSInteger)self.cellCount - (NSInteger)PAGECOUNT + 1));
+        
+        if(currentIndex <= PAGECOUNT && velocity.y >= 0.f){
+            return CGPointMake(proposedContentOffset.x,proposedContentOffset.y);
+        }
+    }
+    
+    return CGPointMake(proposedContentOffset.x, proposedContentOffset.y + offsetAdjustment-ITEM_SIZE_HEIGHT/1.8);
+}
+```
+
+### 5. 如何进行点击
+因为我们现在的原理不同，点击会出现偏移。故我们需要这么做。判断一下当前变换后的矩阵区域是否包含我们手点击的这个点即可。
+
+```objc
+- (void)event:(UITapGestureRecognizer *)gesture
+{
+    CGPoint point = [gesture locationInView:self.collectionView];
+    
+    NSArray *arrayVisible = self.flowLayout.arrayVisibleAttributes;
+    for(NSInteger i = arrayVisible.count-2; i >= 0 ; i-- )
+    {
+        if(i < 0)
+            break;
+        
+        UICollectionViewLayoutAttributes* attributesCurrent = [arrayVisible objectAtIndex:i];
+        UICollectionViewLayoutAttributes* attributesNext = [arrayVisible objectAtIndex:(i+1)];
+        
+        if(attributesNext != nil){
+            CGRect regsionImageView = CGRectMake(attributesCurrent.frame.origin.x, attributesCurrent.frame.origin.y, attributesCurrent.frame.size.width, attributesNext.frame.origin.y - attributesCurrent.frame.origin.y);
+            
+            if(CGRectContainsPoint(regsionImageView, point)){
+                if(attributesCurrent.alpha == 1.f){
+                    
+                    NSLog(@"%ld",(long)attributesCurrent.indexPath.row);
+                }
+                break;
+            }
+        }
+    }
+}
+```
+
+## 四. Demo下载
+[Demo下载](http://share.weiyun.com/188cca3aac35cbc23b7b7c0e2d1f237a)
+
+## 参考文档
+
+1. [实现iOS 9 Task Switcher动画](http://tech.glowing.com/cn/implement-ios9-task-switcher-animation/)  
+2. [纯代码创建UICollectionView步骤以及简单使用](http://www.jianshu.com/p/16c9d466f88c)
